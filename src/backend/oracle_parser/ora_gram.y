@@ -652,10 +652,12 @@ static void determineLanguage(List *options);
 %type <list>		hash_partbound
 %type <defelt>		hash_partbound_elem
 
-%type <node> param_mode
 %type <node> param_mode_item
 %type <list> param_mode_list
+%type <list> params_length_list
 %type <str>  opt_param_name
+%type <node> param_mode
+%type <boolean>	opt_do_from_where
 
 %type <list>	identity_clause identity_options drop_identity
 %type <boolean>	opt_with opt_by
@@ -778,7 +780,7 @@ static void determineLanguage(List *options);
 	OVER OVERLAPS OVERLAY OVERRIDING OWNED OWNER PACKAGES 
 
 	PARALLEL PARAMETER PARSER PARTIAL PARTITION PASSING PASSWORD PATH
-	PGEXTRACT PLACING PLAN PLANS POLICY
+	EXTRACT PGEXTRACT PLACING PLAN PLANS POLICY
 	POSITION PRECEDING PRECISION PRESERVE PREPARE PREPARED PRIMARY
 	PRIOR PRIVILEGES PROCEDURAL PROCEDURE PROCEDURES PROGRAM PUBLICATION
 
@@ -846,6 +848,8 @@ static void determineLanguage(List *options);
 %token <keyword> BINARY_FLOAT_NAN BINARY_FLOAT_INFINITY
 	BINARY_DOUBLE_NAN BINARY_DOUBLE_INFINITY
 %token <keyword> NAN_P INFINITE_P
+
+%token <keyword> PARAMSLENGTH
 
 %type <node> CreatePackageStmt CreatePackageBodyStmt AlterPackageStmt
 %type <node> package_proper_item
@@ -1252,6 +1256,21 @@ CallStmt:	CALL func_application
 
 					n->funccall = castNode(FuncCall, $2);
 					$$ = (Node *) n;
+				}
+			| CALL func_application INTO ORAPARAM
+				{
+					CallStmt *n = makeNode(CallStmt);
+					OraParamRef *hostvar = makeNode(OraParamRef);
+					char	*callstr = NULL;
+					n->funccall = castNode(FuncCall, $2);
+					hostvar->number = 0;
+					hostvar->location = @4;
+					hostvar->name = $4;
+					n->hostvariable = hostvar;
+					callstr = pnstrdup(pg_yyget_extra(yyscanner)->core_yy_extra.scanbuf + @2, @3 - @2);
+					n->callinto = psprintf("%s := %s;", $4, callstr);
+					pfree(callstr);
+					$$ = (Node *)n;
 				}
 			| EXEC exec_func_application
 				{
@@ -9409,7 +9428,7 @@ func_arg_with_default:
 					$$ = $1;
 					$$->defexpr = $3;
 				}
-		| func_arg '=' a_expr
+		| func_arg plassign_equals a_expr
 				{
 					$$ = $1;
 					$$->defexpr = $3;
@@ -10236,6 +10255,18 @@ DoStmt: DO dostmt_opt_list
 					DoStmt *n = makeNode(DoStmt);
 					n->args = $2;
 					n->paramsmode = $4;
+					n->paramslen = NIL;
+					determineLanguage(n->args);
+					$$ = (Node *)n;
+				}
+
+			| DO dostmt_opt_list USING param_mode_list PARAMSLENGTH params_length_list opt_do_from_where
+				{
+					DoStmt *n = makeNode(DoStmt);
+					n->args = $2;
+					n->paramsmode = $4;
+					n->paramslen = $6;
+					n->do_from_call = $7;
 					determineLanguage(n->args);
 					$$ = (Node *)n;
 				}
@@ -10303,6 +10334,21 @@ param_mode:
 				| IN_P OUT_P    		{ $$ = (Node *) makeString("inout"); }
 		;
 
+params_length_list:
+			SignedIconst
+				{
+					$$ = list_make1(makeInteger($1));
+				}
+			| params_length_list ',' SignedIconst
+				{
+					$$ = lappend($1, makeInteger($3));
+				}
+		;
+
+opt_do_from_where:
+			GENERATED FROM CALL			{ $$ = true; }
+			| /*EMPTY*/					{ $$ = false; }
+		;
 
 /*****************************************************************************
  *
@@ -17965,6 +18011,13 @@ func_expr_common_subexpr:
 											   COERCE_SQL_SYNTAX,
 											   @1);
 				}
+			| EXTRACT '(' extract_list ')'
+				{
+					$$ = (Node *) makeFuncCall(SystemFuncName("extract"),
+											   $3,
+											   COERCE_SQL_SYNTAX,
+											   @1);
+				}
 			/* End - ReqID:SRS-SQL-XML */
 			| NORMALIZE '(' a_expr ')'
 				{
@@ -18201,26 +18254,25 @@ func_expr_common_subexpr:
 			/* End - ReqID:SRS-SQL-XML */
 			| USERENV '(' Sconst ')'
 				{
-					if (strcmp(downcase_identifier($3, strlen($3), true, true), "client_info") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_client_info"), NIL, COERCE_EXPLICIT_CALL, @1);
-					else if (strcmp(downcase_identifier($3, strlen($3), true, true), "entryid") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_entryid"), NIL, COERCE_EXPLICIT_CALL, @1);
-					else if (strcmp(downcase_identifier($3, strlen($3), true, true), "terminal") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_terminal"), NIL, COERCE_EXPLICIT_CALL, @1);
-					else if (strcmp(downcase_identifier($3, strlen($3), true, true), "isdba") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_isdba"), NIL, COERCE_EXPLICIT_CALL, @1);
-					else if (strcmp(downcase_identifier($3, strlen($3), true, true), "lang") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_lang"), NIL, COERCE_EXPLICIT_CALL, @1);
-					else if (strcmp(downcase_identifier($3, strlen($3), true, true), "language") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_language"), NIL, COERCE_EXPLICIT_CALL, @1);
-					else if (strcmp(downcase_identifier($3, strlen($3), true, true), "sessionid") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_sessionid"), NIL, COERCE_EXPLICIT_CALL, @1);
-					else if (strcmp(downcase_identifier($3, strlen($3), true, true), "sid") == 0)
-						$$ = (Node *) makeFuncCall(OracleSystemFuncName("get_sid"), NIL, COERCE_EXPLICIT_CALL, @1);
+					char *normalized_param = downcase_identifier($3, strlen($3), true, true);
+
+					#define CHECK_AND_CALL(param, func_name) \
+						if (strcmp(normalized_param, param) == 0) \
+							$$ = (Node *) makeFuncCall(OracleSystemFuncName(func_name), NIL, COERCE_EXPLICIT_CALL, @1);
+
+					CHECK_AND_CALL("client_info", "get_client_info")
+					else CHECK_AND_CALL("entryid", "get_entryid")
+					else CHECK_AND_CALL("terminal", "get_terminal")
+					else CHECK_AND_CALL("isdba", "get_isdba")
+					else CHECK_AND_CALL("lang", "get_lang")
+					else CHECK_AND_CALL("language", "get_language")
+					else CHECK_AND_CALL("sessionid", "get_sessionid")
+					else CHECK_AND_CALL("sid", "get_sid")
 					else
 						ereport(ERROR,
 								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-								 errmsg("invalid USERENV parameter.")));
+								 errmsg("invalid USERENV parameter: \"%s\".", $3)));
+					#undef CHECK_AND_CALL
 				}
 			| JSON_OBJECT '(' func_arg_list ')'
 				{
@@ -20279,6 +20331,7 @@ unreserved_keyword:
 			| PARALLEL
 			| PARALLEL_ENABLE
 			| PARAMETER
+			| PARAMSLENGTH
 			| PARSER
 			| PARTIAL
 			| PARTITION
@@ -20457,6 +20510,7 @@ col_name_keyword:
 			| DECIMAL_P
 			| DECODE
 			| EXISTS
+			| EXTRACT
 			| FLOAT_P
 			| GREATEST
 			| GROUPING
@@ -20815,6 +20869,7 @@ bare_label_keyword:
 			| EXTEND
 			| EXTENSION
 			| EXTERNAL
+			| EXTRACT
 			| FALSE_P
 			| FAMILY
 			| FINALIZE
@@ -20985,6 +21040,7 @@ bare_label_keyword:
 			| PARALLEL
 			| PARALLEL_ENABLE
 			| PARAMETER
+			| PARAMSLENGTH
 			| PARSER
 			| PARTIAL
 			| PARTITION
